@@ -1,0 +1,27 @@
+name: YouTubeVision
+options:
+  bundleIdPrefix: com.ahmadxon
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  YouTubeVision:
+    type: application
+    platform: macOS
+    sources:
+      - YouTubeVision
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ahmadxon.youtube-vision
+        PRODUCT_NAME: YouTube Vision
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_LSUIElement: true
+        INFOPLIST_KEY_CFBundleDisplayName: YouTube Vision
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_ENTITLEMENTS: YouTubeVision/YouTubeVision.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: YouTubeVision/Info.plist
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Ahmadxon Qodirov"
