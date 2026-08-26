@@ -63,12 +63,19 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
         })()
         """
 
-        chromeExecJS(js) { [weak self] result in
-            guard let self, let result else { return }
+        browserExecJS(js) { [weak self] result in
+            guard let self else { return }
 
-            guard let data = result.data(using: .utf8),
+            // If poll fails (Chrome not responding, no tab, etc.) → mark as not playing
+            guard let result,
+                  let data = result.data(using: .utf8),
                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  dict["error"] == nil else { return }
+                  dict["error"] == nil else {
+                Task { @MainActor [weak self] in
+                    self?.isPlaying = false
+                }
+                return
+            }
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -101,21 +108,21 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
     // MARK: - Playback controls
 
     func togglePlayPause() {
-        chromeExecJS("(function(){ var v=document.querySelector('video'); if(v){ v.paused ? v.play() : v.pause(); } })()")
+        browserExecJS("(function(){ var v=document.querySelector('video'); if(v){ v.paused ? v.play() : v.pause(); } })()")
     }
 
     func play() {
-        chromeExecJS("document.querySelector('video')?.play()")
+        browserExecJS("document.querySelector('video')?.play()")
     }
 
     func pause() {
-        chromeExecJS("document.querySelector('video')?.pause()")
+        browserExecJS("document.querySelector('video')?.pause()")
     }
 
     func nextVideo() {
         // If in a playlist/mix, use YouTube's next button (follows playlist order).
         // Otherwise, click the first suggested video in the sidebar.
-        chromeExecJS("""
+        browserExecJS("""
         (function(){
             var list = new URL(location.href).searchParams.get('list');
             if (list) {
@@ -129,7 +136,7 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
     }
 
     func previousVideo() {
-        chromeExecJS("""
+        browserExecJS("""
         (function(){
             var v = document.querySelector('video');
             if (v && v.currentTime > 3) { v.currentTime = 0; }
@@ -140,58 +147,109 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
     func seek(to fraction: Double) {
         let seconds = fraction * duration
-        chromeExecJS("(function(){ var v=document.querySelector('video'); if(v) v.currentTime=\(seconds); })()")
+        browserExecJS("(function(){ var v=document.querySelector('video'); if(v) v.currentTime=\(seconds); })()")
     }
 
     func setVolume(_ vol: Double) {
         volume = vol
-        chromeExecJS("(function(){ var v=document.querySelector('video'); if(v) v.volume=\(vol / 100.0); })()")
+        browserExecJS("(function(){ var v=document.querySelector('video'); if(v) v.volume=\(vol / 100.0); })()")
     }
 
     func setSpeed(_ spd: Double) {
         speed = spd
-        chromeExecJS("(function(){ var v=document.querySelector('video'); if(v) v.playbackRate=\(spd); })()")
+        browserExecJS("(function(){ var v=document.querySelector('video'); if(v) v.playbackRate=\(spd); })()")
     }
+
+    // MARK: - Supported browsers (Chromium-based, same AppleScript API)
+
+    private static let browsers = [
+        "Google Chrome",
+        "Brave Browser",
+        "Microsoft Edge",
+        "Arc",
+        "Yandex",
+        "Opera",
+        "Vivaldi",
+        "Chromium"
+    ]
+
+    /// The browser we last found a YouTube tab in — skip scanning all browsers every poll.
+    private var activeBrowser: String?
 
     // MARK: - AppleScript bridge
 
-    private func chromeExecJS(_ js: String, completion: ((String?) -> Void)? = nil) {
+    private func browserExecJS(_ js: String, completion: ((String?) -> Void)? = nil) {
         let escapedJS = js
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
 
-        let script = """
-        tell application "Google Chrome"
-            set ytTab to missing value
-            repeat with w in windows
-                repeat with t in tabs of w
-                    if URL of t contains "youtube.com/watch" then
-                        set ytTab to t
-                        exit repeat
-                    end if
-                end repeat
-                if ytTab is not missing value then exit repeat
-            end repeat
-            if ytTab is missing value then return "no_tab"
-            return execute ytTab javascript "\(escapedJS)"
-        end tell
-        """
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let appleScript = NSAppleScript(source: script)
-            var errorInfo: NSDictionary?
-            let result = appleScript?.executeAndReturnError(&errorInfo)
-
-            if let errorInfo {
-                print("[YTEngine] AppleScript error: \(errorInfo)")
+            // Try the last active browser first, then scan all others
+            var browsersToTry = Self.browsers
+            if let active = self.activeBrowser {
+                browsersToTry = [active] + Self.browsers.filter { $0 != active }
             }
 
-            let output = result?.stringValue
-            if let completion {
-                DispatchQueue.main.async {
-                    completion(output)
+            for browser in browsersToTry {
+                let script = """
+                tell application "System Events"
+                    if not (exists process "\(browser)") then return "not_running"
+                end tell
+                tell application "\(browser)"
+                    set playingTab to missing value
+                    set firstTab to missing value
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            if URL of t contains "youtube.com/watch" then
+                                if firstTab is missing value then set firstTab to t
+                                set isPlaying to execute t javascript "!document.querySelector('video')?.paused"
+                                if isPlaying is "true" then
+                                    set playingTab to t
+                                    exit repeat
+                                end if
+                            end if
+                        end repeat
+                        if playingTab is not missing value then exit repeat
+                    end repeat
+                    set ytTab to playingTab
+                    if ytTab is missing value then set ytTab to firstTab
+                    if ytTab is missing value then return "no_tab"
+                    return execute ytTab javascript "\(escapedJS)"
+                end tell
+                """
+
+                let appleScript = NSAppleScript(source: script)
+                var errorInfo: NSDictionary?
+                let result = appleScript?.executeAndReturnError(&errorInfo)
+                let output = result?.stringValue
+
+                // Skip browsers that aren't running or have no YouTube tab
+                if output == "not_running" || output == "no_tab" {
+                    continue
                 }
+
+                if let errorInfo {
+                    print("[YTEngine] \(browser) error: \(errorInfo)")
+                    continue
+                }
+
+                // Found a YouTube tab in this browser — cache it
+                DispatchQueue.main.async { [weak self] in
+                    self?.activeBrowser = browser
+                }
+
+                if let completion {
+                    DispatchQueue.main.async { completion(output) }
+                }
+                return
+            }
+
+            // No browser had a YouTube tab
+            if let completion {
+                DispatchQueue.main.async { completion(nil) }
             }
         }
     }
