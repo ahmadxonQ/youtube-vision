@@ -43,17 +43,3 @@ sudo xattr -cr "/Applications/YouTube Vision.app"
 
 - macOS 13 Ventura or later
 - Google Chrome
-
-## Building from Source
-
-```bash
-git clone https://github.com/ahmadxonQ/youtube-vision.git
-cd youtube-vision
-xcodebuild -scheme YouTubeVision -configuration Release build
-```
-
-The built app will be in `~/Library/Developer/Xcode/DerivedData/YouTubeVision-*/Build/Products/Release/`.
-
-## License
-
-MIT
