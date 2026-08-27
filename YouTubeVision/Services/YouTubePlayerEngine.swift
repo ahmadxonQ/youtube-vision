@@ -36,7 +36,7 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
             }
         }
         isReady = true
-        print("[YTEngine] Polling started")
+        NSLog("[YTEngine] Polling started")
     }
 
     /// Auto-enable "Allow JavaScript from Apple Events" for all installed browsers.
@@ -50,7 +50,7 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
             if let prefs = UserDefaults(suiteName: browser.bundleID) {
                 if prefs.bool(forKey: "AppleScriptEnabled") == false {
                     prefs.set(true, forKey: "AppleScriptEnabled")
-                    print("[YTEngine] Enabled AppleScript for \(browser.name)")
+                    NSLog("[YTEngine] Enabled AppleScript for \(browser.name)")
                 }
             }
         }
@@ -201,27 +201,22 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
     /// Returns the names of supported browsers that are currently running.
     private func runningBrowsers() -> [String] {
-        let names = Self.browsers.map { "\"\($0)\"" }.joined(separator: ", ")
-        let script = """
-        tell application "System Events"
-            set running_list to {}
-            repeat with b in {\(names)}
-                if exists process b then set end of running_list to b
-            end repeat
-            return running_list
-        end tell
-        """
-        let appleScript = NSAppleScript(source: script)
-        var errorInfo: NSDictionary?
-        guard let result = appleScript?.executeAndReturnError(&errorInfo) else { return [] }
-
-        // Result is an AppleScript list — extract each item
         var found: [String] = []
-        for i in 1...result.numberOfItems {
-            if let name = result.atIndex(i)?.stringValue {
-                found.append(name)
+        for browser in Self.browsers {
+            let script = """
+            tell application "System Events"
+                if exists process "\(browser)" then return "yes"
+                return "no"
+            end tell
+            """
+            let appleScript = NSAppleScript(source: script)
+            var errorInfo: NSDictionary?
+            let result = appleScript?.executeAndReturnError(&errorInfo)
+            if result?.stringValue == "yes" {
+                found.append(browser)
             }
         }
+        NSLog("[YTEngine] Running browsers: %@", found.isEmpty ? "none" : found.joined(separator: ", "))
         return found
     }
 
@@ -278,12 +273,12 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
                 let result = appleScript?.executeAndReturnError(&errorInfo)
                 let output = result?.stringValue
 
-                if output == "no_tab" { continue }
-
                 if let errorInfo {
-                    print("[YTEngine] \(browser) error: \(errorInfo)")
+                    NSLog("[YTEngine] %@ error: %@", browser, errorInfo)
                     continue
                 }
+
+                if output == "no_tab" || output == nil { continue }
 
                 // Found a YouTube tab in this browser — cache it
                 DispatchQueue.main.async { [weak self] in
