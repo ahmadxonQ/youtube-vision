@@ -225,11 +225,18 @@ struct PlayerBarView: View {
                     .foregroundColor(VisionTheme.textPrimary)
             }
 
-            Text("Play a YouTube video in Chrome — it will appear here automatically.")
+            Text("Play a YouTube video in your browser — it will appear here automatically.")
                 .font(.system(size: 11))
                 .foregroundColor(VisionTheme.textMuted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 20)
+
+            Text("If prompted, allow YouTube Vision to control your browser.")
+                .font(.system(size: 10))
+                .foregroundColor(VisionTheme.textMuted.opacity(0.6))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+                .padding(.top, 2)
         }
         .padding(.bottom, 16)
     }

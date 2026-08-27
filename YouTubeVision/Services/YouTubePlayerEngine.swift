@@ -29,13 +29,31 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
     func startPolling() {
         guard pollTimer == nil else { return }
+        enableAppleScriptForBrowsers()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.poll()
             }
         }
         isReady = true
-        print("[YTEngine] Polling Chrome started")
+        print("[YTEngine] Polling started")
+    }
+
+    /// Auto-enable "Allow JavaScript from Apple Events" for all installed browsers.
+    /// Uses `defaults write <bundleID> AppleScriptEnabled -bool true` via UserDefaults.
+    private func enableAppleScriptForBrowsers() {
+        for browser in Self.browserBundleIDs {
+            // Only write if the app is installed (has a bundle on disk)
+            guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser.bundleID) != nil else {
+                continue
+            }
+            if let prefs = UserDefaults(suiteName: browser.bundleID) {
+                if prefs.bool(forKey: "AppleScriptEnabled") == false {
+                    prefs.set(true, forKey: "AppleScriptEnabled")
+                    print("[YTEngine] Enabled AppleScript for \(browser.name)")
+                }
+            }
+        }
     }
 
     func stopPolling() {
@@ -162,21 +180,50 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
     // MARK: - Supported browsers (Chromium-based, same AppleScript API)
 
-    private static let browsers = [
-        "Google Chrome",
-        "Brave Browser",
-        "Microsoft Edge",
-        "Arc",
-        "Yandex",
-        "Opera",
-        "Vivaldi",
-        "Chromium"
+    /// Browser display name → bundle identifier (for auto-enabling AppleScript)
+    private static let browserBundleIDs: [(name: String, bundleID: String)] = [
+        ("Google Chrome",   "com.google.Chrome"),
+        ("Brave Browser",   "com.brave.Browser"),
+        ("Microsoft Edge",  "com.microsoft.edgemac"),
+        ("Arc",             "company.thebrowser.Browser"),
+        ("Yandex",          "ru.yandex.desktop.browser"),
+        ("Opera",           "com.operasoftware.Opera"),
+        ("Vivaldi",         "com.vivaldi.Vivaldi"),
+        ("Chromium",        "org.chromium.Chromium")
     ]
+
+    private static let browsers = browserBundleIDs.map(\.name)
 
     /// The browser we last found a YouTube tab in — skip scanning all browsers every poll.
     private var activeBrowser: String?
 
     // MARK: - AppleScript bridge
+
+    /// Returns the names of supported browsers that are currently running.
+    private func runningBrowsers() -> [String] {
+        let names = Self.browsers.map { "\"\($0)\"" }.joined(separator: ", ")
+        let script = """
+        tell application "System Events"
+            set running_list to {}
+            repeat with b in {\(names)}
+                if exists process b then set end of running_list to b
+            end repeat
+            return running_list
+        end tell
+        """
+        let appleScript = NSAppleScript(source: script)
+        var errorInfo: NSDictionary?
+        guard let result = appleScript?.executeAndReturnError(&errorInfo) else { return [] }
+
+        // Result is an AppleScript list — extract each item
+        var found: [String] = []
+        for i in 1...result.numberOfItems {
+            if let name = result.atIndex(i)?.stringValue {
+                found.append(name)
+            }
+        }
+        return found
+    }
 
     private func browserExecJS(_ js: String, completion: ((String?) -> Void)? = nil) {
         let escapedJS = js
@@ -187,17 +234,22 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            // Try the last active browser first, then scan all others
-            var browsersToTry = Self.browsers
-            if let active = self.activeBrowser {
-                browsersToTry = [active] + Self.browsers.filter { $0 != active }
+            // Only check browsers that are actually running (avoids "locate app" dialogs)
+            var running = self.runningBrowsers()
+            if running.isEmpty {
+                if let completion {
+                    DispatchQueue.main.async { completion(nil) }
+                }
+                return
             }
 
-            for browser in browsersToTry {
+            // Try the cached active browser first
+            if let active = self.activeBrowser, running.contains(active) {
+                running = [active] + running.filter { $0 != active }
+            }
+
+            for browser in running {
                 let script = """
-                tell application "System Events"
-                    if not (exists process "\(browser)") then return "not_running"
-                end tell
                 tell application "\(browser)"
                     set playingTab to missing value
                     set firstTab to missing value
@@ -226,10 +278,7 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
                 let result = appleScript?.executeAndReturnError(&errorInfo)
                 let output = result?.stringValue
 
-                // Skip browsers that aren't running or have no YouTube tab
-                if output == "not_running" || output == "no_tab" {
-                    continue
-                }
+                if output == "no_tab" { continue }
 
                 if let errorInfo {
                     print("[YTEngine] \(browser) error: \(errorInfo)")
