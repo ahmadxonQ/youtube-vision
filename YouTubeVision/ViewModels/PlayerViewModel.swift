@@ -99,6 +99,17 @@ final class PlayerViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Browser closed or the YouTube tab went away → drop back to the empty state.
+        eng.$hasTab
+            .receive(on: RunLoop.main)
+            .sink { [weak self] hasTab in
+                guard let self, !hasTab else { return }
+                self.currentTrack = nil
+                self.currentTime = 0
+                self.duration = 0
+            }
+            .store(in: &cancellables)
+
         eng.startPolling()
     }
 

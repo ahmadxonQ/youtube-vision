@@ -17,9 +17,16 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
     @Published var isReady = false
     @Published var videoID: String = ""
 
+    /// True while a YouTube tab is reachable in some running browser.
+    @Published var hasTab = false
+
     // MARK: - Private
 
     private var pollTimer: Timer?
+
+    /// Guards against overlapping polls — an AppleScript round-trip can take
+    /// longer than the 0.5s timer interval.
+    private var isPolling = false
 
     // MARK: - Setup
 
@@ -64,6 +71,9 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
     // MARK: - Poll Chrome
 
     private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
+
         let js = """
         (function(){
             var v = document.querySelector('video');
@@ -90,13 +100,18 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   dict["error"] == nil else {
                 Task { @MainActor [weak self] in
-                    self?.isPlaying = false
+                    guard let self else { return }
+                    self.isPolling = false
+                    self.isPlaying = false
+                    self.hasTab = false
                 }
                 return
             }
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.isPolling = false
+                self.hasTab = true
 
                 if let time = dict["currentTime"] as? Double {
                     self.currentTime = time
@@ -199,24 +214,20 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
     // MARK: - AppleScript bridge
 
-    /// Returns the names of supported browsers that are currently running.
+    /// Names of supported browsers that are currently running.
+    ///
+    /// Uses NSWorkspace rather than asking System Events — that avoids a second
+    /// Automation permission prompt and 8 AppleScript round-trips per poll.
     private func runningBrowsers() -> [String] {
-        var found: [String] = []
-        for browser in Self.browsers {
-            let script = """
-            tell application "System Events"
-                if exists process "\(browser)" then return "yes"
-                return "no"
-            end tell
-            """
-            let appleScript = NSAppleScript(source: script)
-            var errorInfo: NSDictionary?
-            let result = appleScript?.executeAndReturnError(&errorInfo)
-            if result?.stringValue == "yes" {
-                found.append(browser)
-            }
+        let installed = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        var found = Self.browserBundleIDs
+            .filter { installed.contains($0.bundleID) }
+            .map(\.name)
+
+        // Try the browser we last found a YouTube tab in first.
+        if let active = activeBrowser, found.contains(active) {
+            found = [active] + found.filter { $0 != active }
         }
-        NSLog("[YTEngine] Running browsers: %@", found.isEmpty ? "none" : found.joined(separator: ", "))
         return found
     }
 
@@ -226,23 +237,14 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+        // Resolved here, on the main actor, before hopping off-thread.
+        let running = runningBrowsers()
+        guard !running.isEmpty else {
+            completion?(nil)
+            return
+        }
 
-            // Only check browsers that are actually running (avoids "locate app" dialogs)
-            var running = self.runningBrowsers()
-            if running.isEmpty {
-                if let completion {
-                    DispatchQueue.main.async { completion(nil) }
-                }
-                return
-            }
-
-            // Try the cached active browser first
-            if let active = self.activeBrowser, running.contains(active) {
-                running = [active] + running.filter { $0 != active }
-            }
-
+        DispatchQueue.global(qos: .userInitiated).async {
             for browser in running {
                 let script = """
                 tell application "\(browser)"
@@ -252,8 +254,8 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
                         repeat with t in tabs of w
                             if URL of t contains "youtube.com/watch" then
                                 if firstTab is missing value then set firstTab to t
-                                set isPlaying to execute t javascript "!document.querySelector('video')?.paused"
-                                if isPlaying is "true" then
+                                set playState to execute t javascript "(function(){var v=document.querySelector('video');return (v && !v.paused) ? 'playing' : 'paused';})()"
+                                if playState is "playing" then
                                     set playingTab to t
                                     exit repeat
                                 end if
@@ -282,7 +284,7 @@ final class YouTubePlayerEngine: NSObject, ObservableObject {
 
                 // Found a YouTube tab in this browser — cache it
                 DispatchQueue.main.async { [weak self] in
-                    self?.activeBrowser = browser
+                    MainActor.assumeIsolated { self?.activeBrowser = browser }
                 }
 
                 if let completion {
